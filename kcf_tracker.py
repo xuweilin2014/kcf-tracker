@@ -178,8 +178,14 @@ class KCFTracker:
             self.hann = hann2d
         self.hann = self.hann.astype(np.float32)
 
-    # 创建高斯峰函数，函数只在第一帧的时候执行（高斯响应）
+    # 标签制作，函数只在第一帧的时候执行（高斯响应）
+    # 对于 ground_truth，由于模板函数的中心就是目标框的中心，因此论文中使用高斯分布函数作为标签，其分布函数为:
+    # g(x, y) = exp((-1 / (2 * sigma * sigma)) * ((i - cx) ^ 2 + (j - cy)^2))
+    # sigma = sqrt(sizeX * sizeY) / (padding * output_sigma_factor)
+    # 其中，(cx, cy) 表示图像特征矩阵中心，padding 表示扩展框相对于目标框的变化比例为 2.5，output_sigma_factor 表示设定
+    # 的一个值为 0.125
     def createGaussianPeak(self, sizey, sizex):
+        # syh, sxh 为图像特征矩阵的中心点坐标
         syh, sxh = sizey / 2, sizex / 2
         output_sigma = np.sqrt(sizex * sizey) / self.padding * self.output_sigma_factor
         mult = -0.5 / (output_sigma * output_sigma)
@@ -188,21 +194,36 @@ class KCFTracker:
         res = np.exp(mult * (y + x))
         return fftd(res)
 
-    # 使用带宽 sigma 计算高斯卷积核以用于所有图像 X 和 Y 之间的相对位移
-    # 必须都是 M * N 的大小，二者都是周期的（也就是通过一个 cos 窗口进行预处理）
+    # 使用带宽 sigma 计算高斯卷积核函数，x1, x2必须都是 M * N 的大小
+    # 由于无论是训练还是检测都使用到了核相关矩阵，所以 hog 特征的融合主要是在这个过程中进行的，公式如下
+    # k = exp(-d / (sigma * sigma))
+    # d = max(0, (x1x1 + x2x2 - 2 * x1 * x2) / numel(x1))
+    # numel(x1) 也就是 x1 的总像素点的个数
     def gaussianCorrelation(self, x1, x2):
+        """
+        我们首先把特征记为 x1[31]，x2[31]，是一个 31 维的容器，每个维度都是一个长度为 mn 的向量，也就是 x1 和 x2 的 shape 为 (31, mn)
+        注意，这里的 m, n 也就是 size_patch[0] 和 size_patch[1]，所以 size_patch 的 shape 为 [m, n, 31]
+        接下来第一步就是计算上面公式中的 x1 * x2
+        1.首先分别对每个维度进行傅里叶变换，得到 xf1[31] 和 xf2[31]
+        2.xf1[i] 以及 xf2[i] 表示是一个长度为 mn 的向量，所以将 xf1[i] 和 xf2[i] 转变为 [m,n] 的矩阵
+        3.计算 xf1[i] 和 xf2[i] 的共轭在频域的点积（element-wise），这样得到的是 36 个 [m,n] 的复数矩阵，分别对每个矩阵都进行傅里叶逆变换得到 xf12[36],
+        是 36 个 [m,n] 的实数矩阵，然后把 36 个矩阵对应点求和得到一个矩阵记作 xf12，是一个 [m,n] 的实数矩阵
+        """
         if self._hogfeatures:
             c = np.zeros((self.size_patch[0], self.size_patch[1]), np.float32)
             for i in range(self.size_patch[2]):
+                # 将 x1[i], x2[i] 转变为 [m,n] 的矩阵
                 x1aux = x1[i, :].reshape((self.size_patch[0], self.size_patch[1]))
                 x2aux = x2[i, :].reshape((self.size_patch[0], self.size_patch[1]))
+                # 傅立叶域点乘
                 caux = cv2.mulSpectrums(fftd(x1aux), fftd(x2aux), 0, conjB=True)
+                # 进行傅立叶逆变换
                 caux = real(fftd(caux, True))
-                # caux = rearrange(caux)
                 c += caux
             c = rearrange(c)
         else:
-            c = cv2.mulSpectrums(fftd(x1), fftd(x2), 0, conjB=True)   # 'conjB=' is necessary!
+            # 'conjB=' is necessary!
+            c = cv2.mulSpectrums(fftd(x1), fftd(x2), 0, conjB=True)
             c = fftd(c, True)
             c = real(c)
             c = rearrange(c)
@@ -210,9 +231,13 @@ class KCFTracker:
         if x1.ndim == 3 and x2.ndim == 3:
             d = (np.sum(x1[:, :, 0] * x1[:, :, 0]) + np.sum(x2[:, :, 0] * x2[:, :, 0]) - 2.0 * c) / (self.size_patch[0] * self.size_patch[1] * self.size_patch[2])
         elif x1.ndim == 2 and x2.ndim == 2:
+            # python 中，* 表示矩阵中对应元素的点乘，而不是矩阵乘法
+            # np.sum(x1 * x1) 相当于求矩阵 x1 的二范数，然后将矩阵中的每一个元素累加起来，得到的就是一个实数，对于 x2 也是同理
             d = (np.sum(x1 * x1) + np.sum(x2 * x2) - 2.0 * c) / (self.size_patch[0] * self.size_patch[1] * self.size_patch[2])
 
+        # 等价于 d = max(d, 0)
         d = d * (d >= 0)
+        # 得到核相关矩阵
         d = np.exp(-d / (self.sigma * self.sigma))
 
         return d
@@ -297,6 +322,7 @@ class KCFTracker:
     def detect(self, z, x):
         k = self.gaussianCorrelation(x, z)
         # 得到响应图
+        # 这里实际上就是快速检测公式
         res = real(fftd(complexMultiplication(self._alphaf, fftd(k)), True))
 
         # pv:响应最大值，pi:相应最大点的索引数组
