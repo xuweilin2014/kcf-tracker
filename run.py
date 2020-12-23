@@ -12,8 +12,6 @@ interval = 1
 duration = 0.01
 
 # mouse callback function
-
-
 def draw_boundingbox(event, x, y, flags, param):
     global selectingObject, initTracking, onTracking, ix, iy, cx, cy, w, h
 
