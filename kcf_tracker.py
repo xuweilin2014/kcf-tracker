@@ -161,6 +161,18 @@ class KCFTracker:
         self._tmpl = None  # numpy.ndarray    raw: (size_patch[0], size_patch[1])   hog: (size_patch[2], size_patch[0]*size_patch[1])
         self.hann = None  # numpy.ndarray    raw: (size_patch[0], size_patch[1])   hog: (size_patch[2], size_patch[0]*size_patch[1])
 
+    # 使用第一帧和它的跟踪框，初始化 KCF 跟踪器
+    def init(self, roi, image):
+        self._roi = list(map(float, roi))
+        assert (roi[2] > 0 and roi[3] > 0)
+        # _tmpl 是截取的特征的加权平均
+        self._tmpl = self.getFeatures(image, 1)
+        # _prob 是初始化时的高斯响应图
+        self._prob = self.createGaussianPeak(self.size_patch[0], self.size_patch[1])
+        # _alphaf 是频域中的相关滤波模板，有两个通道分成实部和虚部
+        self._alphaf = np.zeros((self.size_patch[0], self.size_patch[1], 2), np.float32)
+        self.train(self._tmpl, 1.0)
+
     # 初始化 hanning 窗口，函数只在第一帧被执行
     # 目的是采样时为不同的样本分配不同的权重，0.5 * 0.5 是用汉宁窗归一化为 [0, 1]，得到的矩阵值就是每个样本的权重
     def createHanningMats(self):
@@ -243,7 +255,7 @@ class KCFTracker:
         return d
 
     def getFeatures(self, image, inithann, scale_adjust=1.0):
-        # roi 表示初始的目标框，[x, y, width, height]
+        # self._roi 表示初始的目标框 [x, y, width, height]
         extracted_roi = [0, 0, 0, 0]
         # cx, cy 表示目标框中心点的 x 坐标和 y 坐标
         cx = self._roi[0] + self._roi[2] / 2  # float
@@ -323,20 +335,25 @@ class KCFTracker:
         k = self.gaussianCorrelation(x, z)
         # 得到响应图
         # 这里实际上就是快速检测公式
+        # y_hat = k_hat * alpha，其中 * 表示对位相乘，并且利用转置消除共轭
         res = real(fftd(complexMultiplication(self._alphaf, fftd(k)), True))
 
-        # pv:响应最大值，pi:相应最大点的索引数组
+        # pv:响应最大值，pi:相应最大点的索引数组: (列下标，行下标)
         _, pv, _, pi = cv2.minMaxLoc(res)   # pv:float  pi:tuple of int
         # 得到响应最大的点索引的 float 表示
         p = [float(pi[0]), float(pi[1])]   # cv::Point2f, [x,y]  #[float,float]
 
         # 使用幅值作差来定位峰值的位置
+        # 也就是对于该响应矩阵，找出其最大响应值 peak_value 和最大响应位置 pxy，如果最大响应位置不在图像边界，那么
+        # 分别比较最大响应位置两侧的响应大小，如果右侧比左侧高，或者下侧比上侧高，则分别将最大响应位置向较大的一侧移动一段距离
+        # px = px + 0.5 * ((right - left) / (2 * peak_value - right - left))
+        # py = py + 0.5 * ((down - up) / (2 * peak_value - down - up))
         if 0 < pi[0] < res.shape[1] - 1:
             p[0] += subPixelPeak(res[pi[1], pi[0] - 1], pv, res[pi[1], pi[0] + 1])
         if 0 < pi[1] < res.shape[0] - 1:
             p[1] += subPixelPeak(res[pi[1] - 1, pi[0]], pv, res[pi[1] + 1, pi[0]])
 
-        # 得出偏离采样中心的位移
+        # 得出偏离采样中心的位移，res.shape[1] / 2 表示采样中心的 x 坐标，res.shape[0] / 2 表示采样中心的 y 坐标
         p[0] -= res.shape[1] / 2.
         p[1] -= res.shape[0] / 2.
 
@@ -344,29 +361,18 @@ class KCFTracker:
         return p, pv
 
     # 使用当前图像的检测结果进行训练
-    # x 是当前帧当前尺度下的特征，train_interp_factor 是 interp_factor
+    # x 是当前帧当前尺度下的 fhog 特征矩阵，train_interp_factor 是 interp_factor
     def train(self, x, train_interp_factor):
         # alphaf 是频域中的相关滤波模板，有两个通道分别实部和虚部
         # _prob 是初始化时的高斯响应图，相当于 y
         k = self.gaussianCorrelation(x, x)
         alphaf = complexDivision(self._prob, fftd(k) + self.lambdar)
 
-        # _tmpl 是截取的特征的加权平均
+        # 模板更新: template = (1 - 0.012) * template + 0.012 * z
         self._tmpl = (1 - train_interp_factor) * self._tmpl + train_interp_factor * x
         # _alphaf 是频域中相关滤波的加权平均
+        # alpha = (1 - 0.012) * alpha + 0.012 * alpha_x_z
         self._alphaf = (1 - train_interp_factor) * self._alphaf + train_interp_factor * alphaf
-
-    # 使用第一帧和它的跟踪框，初始化 KCF 跟踪器
-    def init(self, roi, image):
-        self._roi = list(map(float, roi))
-        assert(roi[2] > 0 and roi[3] > 0)
-        # _tmpl 是截取的特征的加权平均
-        self._tmpl = self.getFeatures(image, 1)
-        # _prob 是初始化时的高斯响应图
-        self._prob = self.createGaussianPeak(self.size_patch[0], self.size_patch[1])
-        # _alphaf 是频域中的相关滤波模板，有两个通道分成实部和虚部
-        self._alphaf = np.zeros((self.size_patch[0], self.size_patch[1], 2), np.float32)
-        self.train(self._tmpl, 1.0)
 
     # 获取当前帧的目标位置以及尺度，image 为当前帧的整幅图像
     # 基于当前帧更新目标位置
@@ -394,6 +400,8 @@ class KCFTracker:
             # Test at a bigger _scale
             new_loc2, new_peak_value2 = self.detect(self._tmpl, self.getFeatures(image, 0, self.scale_step))
 
+            # 对于不同的尺度，都有着尺度惩罚系数 scale_weight，用此系数乘以该尺度下的最大响应值作为该尺度下的真实最大响应值
+            # 取最大响应值对应的尺度为最佳尺度，也就是 self._scale
             if self.scale_weight * new_peak_value1 > peak_value and new_peak_value1 > new_peak_value2:
                 loc = new_loc1
                 peak_value = new_peak_value1

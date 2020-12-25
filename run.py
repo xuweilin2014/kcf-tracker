@@ -61,17 +61,20 @@ if __name__ == '__main__':
         elif initTracking:
             cv2.rectangle(frame, (ix, iy), (ix + w, iy + h), (0, 255, 255), 2)
             print([ix, iy, w, h])
+            # 初始化 kcf tracker，开始对目标进行跟踪
             tracker.init([ix, iy, w, h], frame)
             initTracking = False
             onTracking = True
         elif onTracking:
             t0 = time()
+            # 更新 kcf tracker，并且获取到当前帧中目标的具体位置
             boundingbox = tracker.update(frame)
             t1 = time()
 
             boundingbox = list(map(int, boundingbox))
             print(boundingbox)
-            cv2.rectangle(frame, (boundingbox[0], boundingbox[1]), (boundingbox[0] + boundingbox[2], boundingbox[1] + boundingbox[3]), (0, 255, 255), 1)
+            # 画出物体的当前位置框
+            cv2.rectangle(frame, (boundingbox[0], boundingbox[1]), (boundingbox[0] + boundingbox[2], boundingbox[1] + boundingbox[3]), (0, 255, 255), 3)
 
             duration = 0.8 * duration + 0.2 * (t1 - t0)
             # duration = t1 - t0
