@@ -302,8 +302,11 @@ class KCFTracker:
 
         if self._hogfeatures:
             mapp = {'sizeX': 0, 'sizeY': 0, 'numFeatures': 0, 'map': 0}
+            # 对目标图像进行处理，获取到方向梯度直方图，mapp['map'] 的 shape 为 [sizeY, sizeX, 27]
             mapp = fhog.getFeatureMaps(z, self.cell_size, mapp)
+            # 对目标图像的 cell 进行邻域归一化以及截断操作，得到的特征矩阵的 shape 为 [sizeY, sizeX, 108]，每一个 cell 的维度为 108 维
             mapp = fhog.normalizeAndTruncate(mapp, 0.2)
+            # 对目标图像进行 PCA 降维，将每一个 cell 的维度由 108 维变为 27 + 4 = 31 维，得到的特征矩阵的 shape 为 [sizeY, sizeX, 31]
             mapp = fhog.PCAFeatureMaps(mapp)
             # size_patch 为列表，保存裁剪下来的特征图的 [长，宽，通道]
             self.size_patch = list(map(int, [mapp['sizeY'], mapp['sizeX'], mapp['numFeatures']]))
